@@ -1,0 +1,29 @@
+# The whole point: this database is about other people. Never commit it.
+*.db
+*.db-journal
+*.sqlite3
+.env
+
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Markdown exports contain the same private data as the database.
+export/
+
+# Voice notes.
+audio/
+*.wav
+*.m4a
+*.ogg
+
+.DS_Store
+.idea/
+.vscode/

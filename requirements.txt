@@ -1,0 +1,10 @@
+openai>=1.40
+sqlalchemy>=2.0
+python-dotenv>=1.0
+rapidfuzz>=3.0
+pytest>=8.0
+
+# Optional. Voice input — the model downloads on first use (~1GB for 'small').
+#   pip install faster-whisper
+# Optional. Telegram interface (installed in this venv).
+#   pip install "python-telegram-bot>=21"
