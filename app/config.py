@@ -120,6 +120,9 @@ class Settings:
     # --- Single-user default -------------------------------------------
     # owner_id is threaded through every query from day one, so adding
     # Telegram (owner_id = telegram user id) needs no schema change.
+    # Shown on your own profile row. Only cosmetic — the row is found by
+    # is_self, never by name.
+    owner_name: str = field(default_factory=lambda: _env("OWNER_NAME", "Me"))
     default_owner_id: str = field(
         default_factory=lambda: _env("DEFAULT_OWNER_ID", "local")
     )

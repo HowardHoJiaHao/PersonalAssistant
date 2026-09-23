@@ -139,6 +139,7 @@ tests/
 
 | command | what it does |
 |---|---|
+| `/me` | what it knows about you |
 | `/people` | everyone it knows |
 | `/person <name>` | full profile: current facts, past facts with dates, relations, notes |
 | `/brief <name>` | what to know before seeing them — facts, recent changes, your own words |
@@ -244,6 +245,39 @@ one thing this design cannot tolerate.
   becomes a long-lived service.
 
 ## Features worth knowing about
+
+### It remembers you, not just everyone else
+
+A personal assistant that knows nothing about the person using it can only
+look things up. So the owner gets an **ordinary `Person` row** flagged
+`is_self`, rather than a table of their own — which means facts, relations,
+notes, search and supersession all work on you with no separate machinery,
+and *"my sister is Mei"* is a normal relation instead of a special case.
+
+```
+you › my name is Howard, I'm allergic to prawns and I don't drink
+you › waikeong loves seafood especially prawns, he's my friend from school
+you › I want to bring waikeong out for dinner, where should we go?
+
+› Wai Keong loves seafood, prawns especially — but you're allergic to prawns.
+  A mixed seafood place rather than a prawn specialist, and mention the allergy
+  when you book; shellfish kitchens cross-contaminate. Skip the wine list as
+  the centrepiece too, since you don't drink.
+```
+
+That answer needs both halves of the memory, which is the point.
+
+The risk this creates is mis-routing. *"I'm allergic to prawns"* filed against
+whoever was mentioned last is both a lost fact about you **and** a false one
+about them — and it is the kind that gets acted on at a dinner table. So `I`,
+`me`, `my` and `myself` resolve to your own row in `find_person`, the prompt
+routes first-person statements to `remember_about_me`, and the model is told to
+read `get_about_me` before any advice that depends on your situation.
+[tests/test_self.py](tests/test_self.py) pins the routing.
+
+`/people` deliberately excludes you — "who do I know" is a question about other
+people — but `search_facts` includes you, so *"who likes durian?"* can answer
+"you do".
 
 ### The brief — the reason to keep the notes layer
 

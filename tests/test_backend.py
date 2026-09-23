@@ -247,9 +247,18 @@ def _scenario() -> None:
     assert rel["ok"]
     relations = dispatch("get_relations", {"person_id": peter_id}, OWNER)["relations"]
     assert len(relations) == 1
-    assert relations[0]["from_name"] == "Peter"
-    assert relations[0]["to_name"] == "Peter Tan"
+    # Rows come back already phrased from the asking person's side.
+    assert relations[0]["other_name"] == "Peter Tan"
+    assert relations[0]["relation"] == "colleague"
+    assert relations[0]["phrase"] == "Peter Tan is Peter's colleague"
     show("6. get_relations", relations)
+
+    # ...and the same row read from the other side must not invert meaning.
+    other_side = dispatch(
+        "get_relations", {"person_id": peter2["person_id"]}, OWNER
+    )["relations"]
+    assert other_side[0]["other_name"] == "Peter"
+    assert other_side[0]["phrase"] == "Peter is Peter Tan's colleague"
 
     fixed = dispatch(
         "correct_fact",

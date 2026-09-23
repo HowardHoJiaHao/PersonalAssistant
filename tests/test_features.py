@@ -268,3 +268,40 @@ def test_export_writes_readable_markdown(tmp_path: Path):
 
     assert "[Peter Lim](" in (tmp_path / "index.md").read_text()
     assert "random thought" in (tmp_path / "unattached-notes.md").read_text()
+
+
+def test_future_dated_note_is_a_plan_not_a_last_sighting():
+    """Regression from real data: a note about tomorrow gave "last seen -1d"."""
+    pid = _person("Waikeong")
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    _note("saw waikeong at the mamak", person_ids=[pid], event_date=yesterday)
+    _note("tomorrow waikeong goes to public bank, he wants my photostate ic",
+          person_ids=[pid], event_date=tomorrow)
+
+    brief = dispatch("get_person_brief", {"person_id": pid}, OWNER)
+    assert brief["days_since_last_seen"] == 1, "a plan must not count as a sighting"
+    assert brief["last_seen"] == yesterday
+    assert any("public bank" in n["raw_text"] for n in brief["planned"])
+
+
+def test_planned_notes_surface_in_reminders():
+    """A written-down plan is a reminder no fact can express."""
+    pid = _person("Waikeong")
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+    _note("tomorrow waikeong goes to public bank, remind me in the morning",
+          person_ids=[pid], event_date=tomorrow)
+
+    planned = dispatch("get_reminders", {"within_days": 30}, OWNER)["planned"]
+    assert len(planned) == 1
+    assert planned[0]["days_away"] == 1
+    assert planned[0]["people"] == ["Waikeong"]
+
+
+def test_past_and_distant_notes_are_not_reminders():
+    pid = _person("Waikeong")
+    _note("went to the bank", person_ids=[pid],
+          event_date=(date.today() - timedelta(days=3)).isoformat())
+    _note("holiday next year", person_ids=[pid],
+          event_date=(date.today() + timedelta(days=200)).isoformat())
+    assert dispatch("get_reminders", {"within_days": 30}, OWNER)["planned"] == []

@@ -27,7 +27,9 @@ def _person_markdown(session, owner_id: str, person) -> str:
     facts = repo.get_person_facts(session, owner_id, person.id, include_past=True)
     relations = repo.get_relations(session, owner_id, person.id, include_past=True)
     names = repo.names_for(
-        session, owner_id, [r.from_person for r in relations] + [r.to_person for r in relations]
+        session,
+        owner_id,
+        [r.from_person for r in relations] + [r.to_person for r in relations] + [person.id],
     )
     notes = repo.search_notes(session, owner_id, "", person_id=person.id, limit=1000)
 
@@ -73,9 +75,9 @@ def _person_markdown(session, owner_id: str, person) -> str:
     if relations:
         lines += ["## Relations", ""]
         for r in relations:
-            other = r.to_person if r.from_person == person.id else r.from_person
-            ended = f" _(until {r.valid_to})_" if r.valid_to else ""
-            lines.append(f"- {r.type}: {names.get(other, '?')}{ended}")
+            view = repo.relation_from_perspective(r, person.id, names)
+            ended = f" _(until {view['valid_to']})_" if view["valid_to"] else ""
+            lines.append(f"- {view['relation']}: {view['other_name']}{ended}")
         lines.append("")
 
     if notes:

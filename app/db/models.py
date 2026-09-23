@@ -80,6 +80,16 @@ KEY_ALIASES: dict[str, str] = {
     "mobile": "phone",
 }
 
+# Direction convention, stated once so both ends read correctly:
+#
+#     from_person --type--> to_person
+#     reads as "to_person is the <type> of from_person"
+#
+# So "Wai Keong's son is Almond" is stored as
+#     from=Wai Keong, type=child, to=Almond
+# and read back from Almond's side it must invert to "parent", or the
+# profile page says Almond's child is Wai Keong — backwards, and in a way
+# that looks like ordinary data.
 RELATION_TYPES = (
     "spouse",
     "sibling",
@@ -89,6 +99,17 @@ RELATION_TYPES = (
     "friend",
     "introduced_by",
 )
+
+# How each relation reads from the other person's point of view.
+INVERSE_RELATIONS: dict[str, str] = {
+    "parent": "child",
+    "child": "parent",
+    "spouse": "spouse",
+    "sibling": "sibling",
+    "colleague": "colleague",
+    "friend": "friend",
+    "introduced_by": "introduced",
+}
 
 
 class Person(Base):
@@ -106,6 +127,11 @@ class Person(Base):
     # Short human tag ("badminton, Bangsar") shown when asking the user
     # which Peter they mean. Exists purely to make disambiguation answerable.
     disambiguator: Mapped[Optional[str]] = mapped_column(String(200))
+    # The owner gets an ordinary Person row rather than a table of their
+    # own, so facts, relations, notes and search all work on them with no
+    # new machinery. It also makes "my sister is Mei" a normal relation
+    # instead of a special case.
+    is_self: Mapped[bool] = mapped_column(default=False, nullable=False)
     mention_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_mentioned: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

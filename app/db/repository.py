@@ -17,7 +17,14 @@ from sqlalchemy.orm import Session
 
 from rapidfuzz import fuzz, process
 
-from app.db.models import KEY_ALIASES, Fact, Note, Person, Relation
+from app.db.models import (
+    INVERSE_RELATIONS,
+    KEY_ALIASES,
+    Fact,
+    Note,
+    Person,
+    Relation,
+)
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -139,6 +146,7 @@ def person_to_dict(person: Person) -> dict[str, Any]:
         "relationship": person.relationship,
         "how_we_met": person.how_we_met,
         "disambiguator": person.disambiguator,
+        "is_self": bool(person.is_self),
         "mention_count": person.mention_count,
         "last_mentioned": person.last_mentioned.isoformat()
         if person.last_mentioned
@@ -177,6 +185,37 @@ def note_to_dict(note: Note) -> dict[str, Any]:
         "location": note.location,
         "activity": note.activity,
         "created_at": note.created_at.isoformat() if note.created_at else None,
+    }
+
+
+def relation_from_perspective(
+    relation: Relation, person_id: int, names: dict[int, str]
+) -> dict[str, Any]:
+    """Describe a relation as it reads for ONE person.
+
+    Stored rows are directional (from --type--> to, "to is the type of
+    from"). Handing that row to the other person unchanged inverts the
+    meaning: Almond's profile would claim his child is Wai Keong. So the
+    label is flipped here, once, rather than in every caller.
+    """
+    outgoing = relation.from_person == person_id
+    other_id = relation.to_person if outgoing else relation.from_person
+    other_name = names.get(other_id, "?")
+    # Outgoing: "to_person is the <type> of me". Incoming: invert it.
+    label = relation.type if outgoing else INVERSE_RELATIONS.get(
+        relation.type, relation.type
+    )
+    me = names.get(person_id, "they")
+    return {
+        "relation_id": relation.id,
+        "other_person_id": other_id,
+        "other_name": other_name,
+        # Read this, not `type`: it is already correct for this person.
+        "relation": label,
+        "phrase": f"{other_name} is {me}'s {label}",
+        "valid_from": relation.valid_from.isoformat() if relation.valid_from else None,
+        "valid_to": relation.valid_to.isoformat() if relation.valid_to else None,
+        "is_current": relation.valid_to is None,
     }
 
 
@@ -258,6 +297,43 @@ def _recency_score(person: Person) -> float:
     return score
 
 
+# Words that mean the owner. Matched before anything else so "I" and "me"
+# never collide with a person actually called Me.
+SELF_ALIASES = frozenset({"me", "myself", "i", "my", "self"})
+
+
+def get_self(session: Session, owner_id: str) -> Optional[Person]:
+    return session.scalar(
+        select(Person).where(Person.owner_id == owner_id, Person.is_self.is_(True))
+    )
+
+
+def ensure_self(
+    session: Session, owner_id: str, display_name: str | None = None
+) -> Person:
+    """Fetch the owner's own row, creating it on first use.
+
+    Created lazily rather than at startup: an empty database should stay
+    empty until the user actually says something about themselves.
+    """
+    person = get_self(session, owner_id)
+    if person is None:
+        person = Person(
+            owner_id=owner_id,
+            display_name=(display_name or "Me").strip(),
+            aliases=sorted(SELF_ALIASES),
+            is_self=True,
+            relationship="self",
+            mention_count=0,
+        )
+        session.add(person)
+        session.flush()
+    elif display_name and person.display_name in {"Me", ""}:
+        person.display_name = display_name.strip()
+        session.flush()
+    return person
+
+
 def find_people(
     session: Session,
     owner_id: str,
@@ -280,6 +356,11 @@ def find_people(
     needle = _norm(name)
     if not needle:
         return [], []
+
+    # "me" / "I" / "myself" mean the owner, never a person of that name.
+    if needle in SELF_ALIASES:
+        me = get_self(session, owner_id)
+        return ([me], []) if me else ([], [])
 
     candidates = session.scalars(
         select(Person).where(Person.owner_id == owner_id)
@@ -344,6 +425,11 @@ def upsert_person(
     if person_id is not None:
         person = get_person(session, owner_id, person_id)
 
+    if person is None and _norm(display_name) in SELF_ALIASES:
+        # "upsert_person('me')" must resolve to the owner's row rather
+        # than creating a second person literally called Me.
+        return ensure_self(session, owner_id)
+
     if person is None:
         strong, _ = find_people(session, owner_id, display_name)
         # Only an exact name/alias hit may reuse an existing row. Fuzzy
@@ -390,12 +476,17 @@ def upsert_person(
     return person
 
 
-def list_people(session: Session, owner_id: str) -> list[Person]:
+def list_people(
+    session: Session, owner_id: str, include_self: bool = False
+) -> list[Person]:
+    """Everyone known. Excludes the owner by default — "who do I know" is
+    a question about other people."""
+    stmt = select(Person).where(Person.owner_id == owner_id)
+    if not include_self:
+        stmt = stmt.where(Person.is_self.is_(False))
     return list(
         session.scalars(
-            select(Person)
-            .where(Person.owner_id == owner_id)
-            .order_by(Person.mention_count.desc(), Person.display_name)
+            stmt.order_by(Person.mention_count.desc(), Person.display_name)
         ).all()
     )
 
@@ -964,7 +1055,9 @@ def names_for(session: Session, owner_id: str, ids: Sequence[int]) -> dict[int, 
 
 def stats(session: Session, owner_id: str) -> dict[str, int]:
     people = session.scalar(
-        select(func.count(Person.id)).where(Person.owner_id == owner_id)
+        select(func.count(Person.id)).where(
+            Person.owner_id == owner_id, Person.is_self.is_(False)
+        )
     )
     notes = session.scalar(
         select(func.count(Note.id)).where(Note.owner_id == owner_id)
@@ -1027,12 +1120,21 @@ def get_person_brief(
     ]
 
     notes = search_notes(session, owner_id, "", person_id=person_id, limit=6)
-    last_seen = next((n.event_date for n in notes if n.event_date), None)
+    today = date.today()
+    # A note about something that hasn't happened yet ("tomorrow we meet")
+    # is a plan, not a memory — counting it as "last seen" gives a
+    # negative number of days ago.
+    last_seen = next(
+        (n.event_date for n in notes if n.event_date and n.event_date <= today), None
+    )
+    planned = [
+        note_to_dict(n) for n in notes if n.event_date and n.event_date > today
+    ]
     relations = get_relations(session, owner_id, person_id)
     rel_names = names_for(
         session,
         owner_id,
-        [r.from_person for r in relations] + [r.to_person for r in relations],
+        [r.from_person for r in relations] + [r.to_person for r in relations] + [person_id],
     )
 
     by_category: dict[str, list[dict[str, Any]]] = {}
@@ -1044,11 +1146,15 @@ def get_person_brief(
         "person": person_to_dict(person),
         "facts_by_category": by_category,
         "changed_recently": [fact_to_dict(f) for f in changed],
-        "relations": [relation_to_dict(r, rel_names) for r in relations],
+        "relations": [
+            relation_from_perspective(r, person_id, rel_names) for r in relations
+        ],
         # Verbatim, so the model can quote them and spot loose ends.
         "recent_notes": [note_to_dict(n) for n in notes],
+        # Things already written down as happening next — raise these.
+        "planned": planned,
         "last_seen": last_seen.isoformat() if last_seen else None,
-        "days_since_last_seen": (date.today() - last_seen).days if last_seen else None,
+        "days_since_last_seen": (today - last_seen).days if last_seen else None,
     }
 
 
@@ -1102,6 +1208,40 @@ def get_upcoming(
             }
         )
     return sorted(upcoming, key=lambda item: item["days_away"])
+
+
+def get_planned_notes(
+    session: Session, owner_id: str, within_days: int = 30
+) -> list[dict[str, Any]]:
+    """Notes dated in the future — plans the user already wrote down.
+
+    "tomorrow waikeong will go to public bank, he wants my photostate ic"
+    is a reminder the user explicitly asked for. Facts cannot express it
+    (nothing durable is being claimed), so it would be invisible if the
+    reminder path only looked at dated facts.
+    """
+    today = date.today()
+    horizon = today + timedelta(days=within_days)
+    notes = session.scalars(
+        select(Note).where(
+            Note.owner_id == owner_id,
+            Note.event_date.is_not(None),
+            Note.event_date > today,
+            Note.event_date <= horizon,
+        ).order_by(Note.event_date)
+    ).all()
+
+    out: list[dict[str, Any]] = []
+    for note in notes:
+        names = names_for(session, owner_id, note.person_ids or [])
+        out.append(
+            {
+                **note_to_dict(note),
+                "people": list(names.values()),
+                "days_away": (note.event_date - today).days,
+            }
+        )
+    return out
 
 
 def get_neglected(

@@ -166,7 +166,13 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "save_relation",
-            "description": "Record a relationship between two existing people.",
+            "description": (
+                "Record a relationship between two existing people. DIRECTION "
+                "MATTERS: from_person --type--> to_person reads as 'to_person is "
+                "the <type> of from_person'. So \"Wai Keong's son is Almond\" is "
+                "from_person=Wai Keong, type=child, to_person=Almond. Store it "
+                "once; the reverse direction is derived automatically."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -341,6 +347,58 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "remember_about_me",
+            "description": (
+                "Save DURABLE facts about the USER themselves — things they say "
+                "with 'I', 'me' or 'my'. 'I'm allergic to prawns', 'I work at "
+                "Maybank', 'my sister is Mei'. Same durability bar as anyone "
+                "else: 'I'm tired today' is not a fact. Creates the user's own "
+                "profile on first use."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "display_name": {
+                        "type": "string",
+                        "description": "The user's name, if they have just told you it.",
+                    },
+                    "facts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "category": {"type": "string", "enum": list(FACT_CATEGORIES)},
+                                "key": {"type": "string"},
+                                "value": {"type": "string"},
+                                "reason": {"type": "string"},
+                                "source_note_id": {"type": "integer"},
+                                "date_value": {"type": "string", "description": "YYYY-MM-DD"},
+                                "recurring": {"type": "boolean"},
+                            },
+                            "required": ["category", "key", "value"],
+                        },
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_about_me",
+            "description": (
+                "What you know about the USER: their facts and their relations. "
+                "Use this when they ask what you know about them, and BEFORE "
+                "giving advice that depends on their situation — what to cook "
+                "for someone, what to give as a gift, whether they can eat "
+                "something."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_person_brief",
             "description": (
                 "Everything worth knowing before seeing someone: current facts by "
@@ -367,8 +425,9 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         "function": {
             "name": "get_reminders",
             "description": (
-                "What is coming up (birthdays, anniversaries, dated milestones) and "
-                "who has gone quiet. Use for 'anything coming up?', 'who should I "
+                "What is coming up: dated facts (birthdays, anniversaries), plans "
+                "the user already wrote down as future-dated notes, and who has "
+                "gone quiet. Use for 'anything coming up?', 'who should I "
                 "catch up with?', or when the user asks what they are forgetting."
             ),
             "parameters": {
@@ -607,10 +666,67 @@ def _get_relations(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
             include_past=bool(args.get("include_past", False)),
         )
         ids = {r.from_person for r in relations} | {r.to_person for r in relations}
+        ids.add(args["person_id"])
         names = repo.names_for(session, owner_id, sorted(ids))
         return {
             "ok": True,
-            "relations": [repo.relation_to_dict(r, names) for r in relations],
+            # Already phrased from this person's side — use `relation` and
+            # `phrase`, never re-derive direction from from/to.
+            "relations": [
+                repo.relation_from_perspective(r, args["person_id"], names)
+                for r in relations
+            ],
+        }
+
+
+def _remember_about_me(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    facts = args.get("facts") or []
+    if isinstance(facts, dict):
+        facts = [facts]
+    with get_session() as session:
+        me = repo.ensure_self(session, owner_id, args.get("display_name"))
+        results = [
+            repo.save_fact(
+                session,
+                owner_id,
+                person_id=me.id,
+                category=item.get("category", "preference"),
+                key=item["key"],
+                value=item["value"],
+                reason=item.get("reason"),
+                source_note_id=item.get("source_note_id"),
+                date_value=item.get("date_value"),
+                recurring=bool(item.get("recurring", False)),
+            )
+            for item in facts
+        ]
+        return {"ok": True, "me": repo.person_to_dict(me), "saved": results}
+
+
+def _get_about_me(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
+    with get_session() as session:
+        me = repo.get_self(session, owner_id)
+        if me is None:
+            return {
+                "ok": True,
+                "known": False,
+                "hint": "Nothing about the user yet. Do not invent any.",
+            }
+        facts = repo.get_person_facts(session, owner_id, me.id)
+        relations = repo.get_relations(session, owner_id, me.id)
+        names = repo.names_for(
+            session,
+            owner_id,
+            [r.from_person for r in relations] + [r.to_person for r in relations] + [me.id],
+        )
+        return {
+            "ok": True,
+            "known": True,
+            "me": repo.person_to_dict(me),
+            "facts": [repo.fact_to_dict(f) for f in facts],
+            "relations": [
+                repo.relation_from_perspective(r, me.id, names) for r in relations
+            ],
         }
 
 
@@ -631,6 +747,10 @@ def _get_reminders(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
             "upcoming": repo.get_upcoming(
                 session, owner_id, within_days=int(args.get("within_days", 30))
             ),
+            # Plans the user wrote down, which no fact can express.
+            "planned": repo.get_planned_notes(
+                session, owner_id, within_days=int(args.get("within_days", 30))
+            ),
             "out_of_touch": repo.get_neglected(
                 session, owner_id, quiet_days=int(args.get("quiet_days", 90))
             ),
@@ -639,7 +759,7 @@ def _get_reminders(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
 
 def _list_people(owner_id: str, args: dict[str, Any]) -> dict[str, Any]:
     with get_session() as session:
-        people = repo.list_people(session, owner_id)
+        people = repo.list_people(session, owner_id, include_self=False)
         return {"ok": True, "people": [repo.person_to_dict(p) for p in people]}
 
 
@@ -656,6 +776,8 @@ TOOL_IMPLS: dict[str, Callable[[str, dict[str, Any]], dict[str, Any]]] = {
     "search_facts": _search_facts,
     "search_notes": _search_notes,
     "get_relations": _get_relations,
+    "remember_about_me": _remember_about_me,
+    "get_about_me": _get_about_me,
     "get_person_brief": _get_person_brief,
     "get_reminders": _get_reminders,
     "list_people": _list_people,

@@ -24,7 +24,7 @@ YELLOW = "\033[33m"
 RESET = "\033[0m"
 
 BANNER = f"""{BOLD}Relationship Memory{RESET}
-{DIM}/people  /person <name>  /brief <name>  /remind  /search <text>
+{DIM}/me  /people  /person <name>  /brief <name>  /remind  /search <text>
 /export [dir]  /rederive  /voice <file>  /stats  /new  /quit{RESET}
 """
 
@@ -74,7 +74,7 @@ def _print_profile(owner_id: str, name: str) -> None:
         names = repo.names_for(
             session,
             owner_id,
-            [r.from_person for r in relations] + [r.to_person for r in relations],
+            [r.from_person for r in relations] + [r.to_person for r in relations] + [person.id],
         )
         notes = repo.search_notes(session, owner_id, "", person_id=person.id, limit=3)
 
@@ -110,10 +110,11 @@ def _print_profile(owner_id: str, name: str) -> None:
         if relations:
             print(f"\n  {BOLD}relations{RESET}")
             for r in relations:
-                other = r.to_person if r.from_person == person.id else r.from_person
-                arrow = "→" if r.from_person == person.id else "←"
-                ended = f" {DIM}(until {r.valid_to}){RESET}" if r.valid_to else ""
-                print(f"  {DIM}{arrow}{RESET} {r.type}: {names.get(other, '?')}{ended}")
+                # Phrased from this person's side. Printing the raw
+                # from/to row here said "Almond's child is Wai Keong".
+                view = repo.relation_from_perspective(r, person.id, names)
+                ended = f" {DIM}(until {view['valid_to']}){RESET}" if view["valid_to"] else ""
+                print(f"  {DIM}·{RESET} {view['relation']}: {view['other_name']}{ended}")
         if notes:
             print(f"\n  {BOLD}recent notes{RESET}")
             for n in notes:
@@ -129,9 +130,10 @@ def _print_reminders(owner_id: str, quiet: bool = False) -> None:
     """
     with get_session() as session:
         upcoming = repo.get_upcoming(session, owner_id, within_days=30)
+        planned = repo.get_planned_notes(session, owner_id, within_days=30)
         stale = repo.get_neglected(session, owner_id, quiet_days=90)
 
-    if not upcoming and not stale:
+    if not upcoming and not planned and not stale:
         if not quiet:
             print(f"{DIM}  nothing coming up, nobody overdue{RESET}")
         return
@@ -139,6 +141,10 @@ def _print_reminders(owner_id: str, quiet: bool = False) -> None:
     for item in upcoming:
         when = "today" if item["days_away"] == 0 else f"in {item['days_away']}d"
         print(f"  {YELLOW}◆{RESET} {item['person_name']}: {item['value']} {DIM}({when}){RESET}")
+    for note in planned:
+        when = "tomorrow" if note["days_away"] == 1 else f"in {note['days_away']}d"
+        who = f"{', '.join(note['people'])}: " if note["people"] else ""
+        print(f"  {YELLOW}▸{RESET} {who}{note['raw_text'][:66]} {DIM}({when}){RESET}")
     for person in stale:
         months = person["days_quiet"] // 30
         print(
@@ -170,6 +176,16 @@ def _print_brief(owner_id: str, name: str) -> None:
         for fact in facts:
             reason = f" {DIM}— {fact['reason']}{RESET}" if fact["reason"] else ""
             print(f"  {GREEN}•{RESET} {fact['value']}{reason}")
+
+    if brief["relations"]:
+        print(f"\n  {BOLD}people{RESET}")
+        for r in brief["relations"]:
+            print(f"  {GREEN}•{RESET} {r['relation']}: {r['other_name']}")
+
+    if brief.get("planned"):
+        print(f"\n  {BOLD}coming up{RESET}")
+        for note in brief["planned"]:
+            print(f"  {YELLOW}▸{RESET} {note['event_date']}: {note['raw_text'][:78]}")
 
     changed = brief["changed_recently"]
     if changed:
@@ -256,6 +272,38 @@ async def _do_voice(owner_id: str, path: str) -> None:
     print(f"{GREEN}›{RESET} {reply}\n")
 
 
+def _print_me(owner_id: str) -> None:
+    """What the assistant knows about you."""
+    with get_session() as session:
+        me = repo.get_self(session, owner_id)
+        if me is None:
+            print(f"{DIM}  nothing about you yet — try \"I'm allergic to prawns\"{RESET}")
+            return
+        facts = repo.get_person_facts(session, owner_id, me.id, include_past=True)
+        relations = repo.get_relations(session, owner_id, me.id)
+        names = repo.names_for(
+            session, owner_id,
+            [r.from_person for r in relations] + [r.to_person for r in relations] + [me.id],
+        )
+
+    print(f"\n{BOLD}{me.display_name}{RESET} {DIM}(you){RESET}")
+    current = [f for f in facts if f.valid_to is None]
+    past = [f for f in facts if f.valid_to is not None]
+    for fact in sorted(current, key=lambda f: (f.category, f.key)):
+        reason = f" {DIM}— {fact.reason}{RESET}" if fact.reason else ""
+        print(f"  {GREEN}•{RESET} {fact.value} {DIM}[{fact.category}]{RESET}{reason}")
+    if past:
+        print(f"\n  {BOLD}previously{RESET}")
+        for fact in past:
+            print(f"  {DIM}◦ {fact.value} ({fact.valid_from or '?'} → {fact.valid_to}){RESET}")
+    if relations:
+        print(f"\n  {BOLD}your people{RESET}")
+        for rel in relations:
+            view = repo.relation_from_perspective(rel, me.id, names)
+            print(f"  {DIM}·{RESET} {view['relation']}: {view['other_name']}")
+    print()
+
+
 def _print_stats(owner_id: str) -> None:
     with get_session() as session:
         s = repo.stats(session, owner_id)
@@ -280,6 +328,8 @@ def _handle_command(line: str, owner_id: str) -> bool:
             _print_brief(owner_id, arg)
         else:
             print(f"{DIM}  usage: /brief <name>{RESET}")
+    elif cmd == "me":
+        _print_me(owner_id)
     elif cmd in {"remind", "reminders", "upcoming"}:
         _print_reminders(owner_id)
     elif cmd == "search":
